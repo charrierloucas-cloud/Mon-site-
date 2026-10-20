@@ -1,1 +1,263 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Banc d’essai — performances de l’appareil</title>
+<style>
+  :root { --bg:#eef1f4; --ink:#14202b; --mute:#5a6874; --line:#cfd6dd; --sig:#0e7c86; --bar:#d9e0e6; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0f171e; --ink:#e6edf2; --mute:#93a1ad; --line:#25323d; --sig:#4fc3cd; --bar:#1c2832; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.5 system-ui, sans-serif; }
+  main { max-width:720px; margin:0 auto; padding:32px 20px 56px; }
+  h1 { font-size:clamp(2rem,7vw,3rem); margin:0; line-height:1.05; }
+  h2 { font-size:1.15rem; margin:40px 0 8px; }
+  .sub { color:var(--mute); margin:8px 0 24px; }
+  button { font:inherit; background:var(--ink); color:var(--bg); border:0; border-radius:6px;
+           padding:14px 22px; cursor:pointer; min-height:48px; }
+  button.ghost { background:none; color:var(--ink); border:1px solid var(--line); }
+  button:disabled { opacity:.5; cursor:wait; }
+  .actions { display:flex; gap:10px; flex-wrap:wrap; }
+  .score { display:flex; align-items:baseline; gap:14px; margin:28px 0 4px; }
+  .big { font-size:clamp(4rem,20vw,7rem); font-weight:800; line-height:1; color:var(--sig); }
+  .row { display:grid; grid-template-columns:1fr auto; gap:2px 16px; padding:14px 0; border-top:1px solid var(--line); }
+  .row output { color:var(--mute); text-align:right; }
+  .bar { grid-column:1/-1; height:6px; background:var(--bar); border-radius:3px; overflow:hidden; margin-top:6px; }
+  .bar i { display:block; height:100%; width:0; background:var(--sig); transition:width .5s; }
+  dl { margin:0; display:grid; grid-template-columns:max-content 1fr; gap:6px 20px; }
+  dt { color:var(--mute); } dd { margin:0; overflow-wrap:anywhere; }
+  canvas { display:block; width:100%; max-width:360px; height:auto; margin-top:16px; border:1px solid var(--line); border-radius:6px; }
+  .hist { margin:0; padding:0; list-style:none; }
+  .hist li { display:flex; justify-content:space-between; padding:8px 0; border-top:1px solid var(--line); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Banc d’essai</h1>
+  <p class="sub" id="dev">Détection de l’appareil…</p>
+  <div class="actions">
+    <button id="go">Lancer le test</button>
+    <button id="copy" class="ghost" disabled>Copier les résultats</button>
+  </div>
+  <div class="score"><span class="big" id="total">–</span><span id="verdict" class="sub" style="margin:0">sur 100</span></div>
+  <div id="rows"></div>
+  <canvas id="cv" width="360" height="200"></canvas>
 
+  <h2>Votre appareil</h2>
+  <dl id="info"></dl>
+
+  <h2>Derniers tests sur cet appareil</h2>
+  <ul class="hist" id="hist"></ul>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+const nav = navigator;
+
+/* ---------- Détection de l’appareil ---------- */
+function deviceType() {
+  const ua = nav.userAgent, touch = nav.maxTouchPoints > 0;
+  const w = Math.min(screen.width, screen.height);
+  if (/iPad|Tablet/i.test(ua) || (/Macintosh/.test(ua) && touch) || (/Android/.test(ua) && !/Mobile/.test(ua))) return "Tablette";
+  if (/Mobi|iPhone|Android/i.test(ua) || (touch && w < 600)) return "Mobile";
+  return "PC";
+}
+const TYPE = deviceType();
+
+function gpuName() {
+  try {
+    const gl = document.createElement("canvas").getContext("webgl");
+    const e = gl.getExtension("WEBGL_debug_renderer_info");
+    return e ? gl.getParameter(e.UNMASKED_RENDERER_WEBGL) : "non communiqué";
+  } catch (e) { return "indisponible"; }
+}
+
+async function showInfo() {
+  const c = nav.connection || {};
+  let bat = "non communiquée";
+  try {
+    if (nav.getBattery) {
+      const b = await nav.getBattery();
+      bat = Math.round(b.level * 100) + " %" + (b.charging ? " (en charge)" : "");
+    }
+  } catch (e) {}
+  const rows = [
+    ["Type", TYPE],
+    ["Système", (nav.userAgentData && nav.userAgentData.platform) || nav.platform || "inconnu"],
+    ["Cœurs logiques", nav.hardwareConcurrency || "inconnu"],
+    ["Mémoire", nav.deviceMemory ? "≈ " + nav.deviceMemory + " Go" : "non communiquée"],
+    ["Écran", screen.width + " × " + screen.height + " (×" + (window.devicePixelRatio || 1) + ")"],
+    ["Tactile", nav.maxTouchPoints > 0 ? "oui" : "non"],
+    ["Processeur graphique", gpuName()],
+    ["Connexion", c.effectiveType ? c.effectiveType + ", ≈ " + c.downlink + " Mb/s" : "non communiquée"],
+    ["Batterie", bat]
+  ];
+  $("#info").innerHTML = rows.map(r => "<dt>" + r[0] + "</dt><dd>" + r[1] + "</dd>").join("");
+  $("#dev").textContent = TYPE + " · " + (nav.hardwareConcurrency || "?") + " cœurs · " + screen.width + " × " + screen.height;
+}
+
+/* ---------- Tests ---------- */
+const TESTS = [
+  { id: "cpu1", label: "Processeur, un cœur" },
+  { id: "cpun", label: "Processeur, tous les cœurs" },
+  { id: "mem",  label: "Mémoire" },
+  { id: "gfx",  label: "Affichage et animation" },
+  { id: "disk", label: "Stockage" }
+];
+$("#rows").innerHTML = TESTS.map(t =>
+  '<div class="row"><b>' + t.label + '</b><output id="v-' + t.id + '">–</output>' +
+  '<div class="bar"><i id="b-' + t.id + '"></i></div></div>').join("");
+
+const clamp = n => Math.max(0, Math.min(100, n));
+
+// Boucle de calcul pendant 400 ms, retourne des opérations par seconde
+const WORK = "let t=performance.now(),n=0,x=0;" +
+  "while(performance.now()-t<400){for(let i=0;i<10000;i++){x+=Math.sqrt(i)*Math.sin(i)}n+=10000}";
+
+function cpuSingle() {
+  const ops = new Function(WORK + "return n/(performance.now()-t)*1000;")();
+  return { text: (ops / 1e6).toFixed(0) + " M opérations/s", score: clamp(ops / 2.5e8 * 100) };
+}
+
+function cpuMulti() {
+  return new Promise(res => {
+    const n = Math.min(nav.hardwareConcurrency || 2, 8);
+    const url = URL.createObjectURL(new Blob(
+      ["onmessage=()=>{" + WORK + "postMessage(n/(performance.now()-t)*1000)}"],
+      { type: "text/javascript" }));
+    let total = 0, done = 0;
+    const fail = () => res({ text: "indisponible", score: null });
+    try {
+      for (let i = 0; i < n; i++) {
+        const w = new Worker(url);
+        w.onmessage = e => {
+          total += e.data; w.terminate();
+          if (++done === n) {
+            URL.revokeObjectURL(url);
+            res({ text: (total / 1e6).toFixed(0) + " M opérations/s (" + n + " fils)", score: clamp(total / 1.2e9 * 100) });
+          }
+        };
+        w.onerror = fail;
+        w.postMessage(0);
+      }
+    } catch (e) { fail(); }
+  });
+}
+
+function memory() {
+  const n = 8e6, a = new Float64Array(n), t = performance.now();   // 64 Mo
+  for (let k = 0; k < 3; k++) {
+    for (let i = 0; i < n; i++) a[i] = i * 1.5;
+    let s = 0;
+    for (let i = 0; i < n; i++) s += a[i];
+  }
+  const mbs = (64 * 2 * 3) / ((performance.now() - t) / 1000);
+  return { text: Math.round(mbs).toLocaleString("fr-FR") + " Mo/s", score: clamp(mbs / 4000 * 100) };
+}
+
+function graphics() {
+  return new Promise(res => {
+    const c = $("#cv"), x = c.getContext("2d");
+    const color = getComputedStyle(document.documentElement).getPropertyValue("--sig");
+    const p = Array.from({ length: 1200 }, () => ({
+      x: Math.random() * 360, y: Math.random() * 200,
+      vx: Math.random() * 4 - 2, vy: Math.random() * 4 - 2 }));
+    let frames = 0, worst = 0, t0 = 0, last = 0;
+    function step(t) {
+      if (!t0) { t0 = last = t; }
+      x.clearRect(0, 0, 360, 200); x.fillStyle = color;
+      for (const q of p) {
+        q.x = (q.x + q.vx + 360) % 360; q.y = (q.y + q.vy + 200) % 200;
+        x.beginPath(); x.arc(q.x, q.y, 3, 0, 6.283); x.fill();
+      }
+      frames++; worst = Math.max(worst, t - last); last = t;
+      if (t - t0 < 1500) requestAnimationFrame(step);
+      else {
+        const fps = frames / ((t - t0) / 1000);
+        res({ text: fps.toFixed(0) + " images/s, pire image " + worst.toFixed(0) + " ms", score: clamp(fps / 60 * 100) });
+      }
+    }
+    requestAnimationFrame(step);
+  });
+}
+
+function storage() {
+  return new Promise(res => {
+    const fail = () => res({ text: "indisponible", score: null });
+    try {
+      const name = "bench-" + Date.now(), r = indexedDB.open(name, 1);
+      r.onupgradeneeded = () => r.result.createObjectStore("s");
+      r.onerror = fail;
+      r.onsuccess = () => {
+        const db = r.result, data = new Uint8Array(10240), t = performance.now();
+        const tx = db.transaction("s", "readwrite"), st = tx.objectStore("s");
+        for (let i = 0; i < 200; i++) st.put(data, i);               // 200 × 10 Ko
+        tx.oncomplete = () => {
+          const kbs = 2000 / ((performance.now() - t) / 1000);
+          db.close(); indexedDB.deleteDatabase(name);
+          res({ text: Math.round(kbs).toLocaleString("fr-FR") + " Ko/s en écriture", score: clamp(kbs / 20000 * 100) });
+        };
+        tx.onerror = fail;
+      };
+    } catch (e) { fail(); }
+  });
+}
+
+const RUN = { cpu1: cpuSingle, cpun: cpuMulti, mem: memory, gfx: graphics, disk: storage };
+const pause = () => new Promise(r => setTimeout(r, 60));
+
+/* ---------- Lancement et résultats ---------- */
+let report = "";
+$("#go").onclick = async () => {
+  const go = $("#go");
+  go.disabled = true; go.textContent = "Test en cours…"; $("#copy").disabled = true;
+  $("#total").textContent = "–";
+  const scores = [], lines = [];
+
+  for (const t of TESTS) {
+    $("#v-" + t.id).textContent = "en cours…";
+    $("#b-" + t.id).style.width = "0";
+    await pause();
+    let r;
+    try { r = await RUN[t.id](); } catch (e) { r = { text: "échec", score: null }; }
+    $("#v-" + t.id).textContent = r.text;
+    if (r.score != null) { $("#b-" + t.id).style.width = r.score + "%"; scores.push(r.score); }
+    lines.push(t.label + " : " + r.text);
+  }
+
+  const total = scores.length ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length) : 0;
+  $("#total").textContent = total;
+  $("#verdict").textContent = "sur 100 · " + (total >= 70 ? "très réactif" : total >= 40 ? "correct" : "limité");
+  report = TYPE + " — score " + total + "/100\n" + lines.join("\n");
+
+  try {
+    const h = JSON.parse(localStorage.getItem("bench-hist") || "[]");
+    h.unshift({ d: new Date().toLocaleString("fr-FR"), s: total });
+    localStorage.setItem("bench-hist", JSON.stringify(h.slice(0, 5)));
+  } catch (e) {}
+  showHist();
+
+  go.disabled = false; go.textContent = "Relancer le test"; $("#copy").disabled = false;
+};
+
+$("#copy").onclick = async () => {
+  try { await navigator.clipboard.writeText(report); $("#copy").textContent = "Copié"; }
+  catch (e) { $("#copy").textContent = "Copie impossible"; }
+  setTimeout(() => $("#copy").textContent = "Copier les résultats", 1800);
+};
+
+function showHist() {
+  let h = [];
+  try { h = JSON.parse(localStorage.getItem("bench-hist") || "[]"); } catch (e) {}
+  $("#hist").innerHTML = h.length
+    ? h.map(e => "<li><span>" + e.d + "</span><b>" + e.s + " / 100</b></li>").join("")
+    : "<li>Aucun test pour l’instant. Lancez-en un ci-dessus.</li>";
+}
+
+showInfo();
+showHist();
+</script>
+</body>
+</html>
